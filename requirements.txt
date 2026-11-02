@@ -1,0 +1,14 @@
+# Runtime dependencies for ai_enhance.py (Resemble Enhance).
+# PyTorch is installed separately by setup.sh, from the index that matches your GPU.
+# Versions are the ones the pipeline was tested with.
+numpy==2.5.4
+scipy==1.18.1
+soundfile==0.14.0
+librosa==1.0.0
+omegaconf==2.4.0
+rich==15.0.0
+tqdm==4.70.1
+huggingface_hub==2.3.0
+matplotlib==3.11.2
+pandas==3.1.0
+tabulate==0.10.0
