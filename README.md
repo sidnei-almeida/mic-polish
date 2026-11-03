@@ -4,8 +4,10 @@
 
 mic-polish is a small, local voice pipeline for video essays, gameplay commentary and podcasts. It
 records the voice on its own track, removes room noise, restores the frequencies a budget
-microphone loses, and delivers a broadcast-ready file at a consistent loudness. Nothing is uploaded
-anywhere: every step runs locally with FFmpeg and open-source models.
+microphone loses, and delivers a broadcast-ready file at a consistent loudness. For gameplay
+recorded **on speakers instead of headphones**, it also removes the game from the mic, using the
+game's own audio track as the reference. Nothing is uploaded anywhere: every step runs locally with
+FFmpeg and open-source models.
 
 | Mode | Voice-to-noise gap | What it does |
 | --- | --- | --- |
@@ -22,6 +24,7 @@ speech level and the noise floor; higher is cleaner.*
 
 - [Features](#features)
 - [How it works](#how-it-works)
+- [Gameplay sessions](#gameplay-sessions)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Usage](#usage)
@@ -33,6 +36,11 @@ speech level and the noise floor; higher is cleaner.*
 
 ## Features
 
+- **Game removal for speaker setups.** Plays on speakers, talks over it: the game is subtracted from
+  the mic with the clean game track as the reference (offline echo cancellation with delay and
+  clock-drift tracking). See [Gameplay sessions](#gameplay-sessions).
+- **Speech detection, ducking and markers** for the edit: where you talk, the game track lowered under
+  your voice, and the segments as CSV and as FilmCraft markers.
 - **Two quality levels.** A fast DSP chain that needs only FFmpeg, and an AI mode that rebuilds the
   voice with [Resemble Enhance](https://github.com/resemble-ai/resemble-enhance).
 - **GPU acceleration** on Intel Arc (PyTorch XPU) or NVIDIA (CUDA), with automatic CPU fallback if
@@ -72,6 +80,65 @@ Denoising (stages 2 and 3) is chosen automatically:
   [`deep-filter`](https://github.com/Rikorose/DeepFilterNet) binary is on your `PATH`.
 - **RNNoise**: the default, built into FFmpeg, using the bundled `models/sh.rnnn` speech model.
 
+## Gameplay sessions
+
+`session.sh` takes a whole recording, as [GPU Screen Recorder](https://git.dec05eba.com/gpu-screen-recorder/)
+writes it (game on audio track 1, mic on track 2), and returns everything the edit needs:
+
+```bash
+./session.sh ~/Videos/episode/gameplay.mkv          # outputs in gameplay-polish/ next to it
+./session.sh mic.wav --game game.wav                 # or separate files
+./session.sh gameplay.mkv --ai --duck-db -10 --json  # options; --json prints progress as JSON lines
+```
+
+| Step | What happens |
+| --- | --- |
+| read | The tracks are loaded and checked: a silent mic, clipping, a mic too quiet. If the mic turns out to be *ahead* of the game, the tracks are swapped, and it says so. |
+| game removal | The game is subtracted from the mic (below). Skipped when there is no game track. |
+| speech | [Silero VAD](https://github.com/snakers4/silero-vad) finds where you speak. |
+| room | The quietest non-speech moments of the whole session become a 3 s clip of the room's noise, put in front of the take, so the denoiser learns the room (not whatever the first 3 s happened to be). |
+| polish | `enhance.sh` with the same options (`--ai`, `--warm`, `--pitch`). |
+| edit | The game track ducked by 8 dB while you talk (eased in and out, held between close sentences), markers, a report. |
+
+Outputs, all on the recording's timeline:
+
+| File | Contents |
+| --- | --- |
+| `voice.wav` | The mic, game removed and polished (48 kHz, 24-bit, -16 LUFS) |
+| `game-ducked.wav` | The game track lowered under the voice (stereo) |
+| `markers.csv` | Speech segments: start, end, duration, timecode |
+| `filmcraft.jsonl` | The same as FilmCraft markers: `filmcraft-cli --project p.fcproj --save run filmcraft.jsonl` |
+| `duck.json` | The ducking keyframes, for an editor that wants them instead of the rendered track |
+| `report.json` | Delay, drift, what was removed, how much you talked |
+
+### How the game is removed
+
+The recorder captures the game twice: clean on its own track, and again through the room into the
+mic. With the clean copy as a reference this is echo cancellation, done offline (`engine/aec.py`):
+
+1. **Delay and clock drift.** The mic hears the speakers a few milliseconds late, and the two devices
+   run on slightly different clocks, so the delay creeps over a long session (50 ppm is 0.18 s an
+   hour). It is measured with GCC-PHAT across the take, fitted with a robust line, then refined on
+   short windows with an upsampled correlation. The game track is resampled onto the mic's timeline
+   with a windowed-sinc interpolator.
+2. **Room filter, solved rather than adapted.** Per frequency bin, a filter covering ~250 ms of
+   reverb is the least-squares solution over 20 s blocks, computed only where the game plays and you
+   don't speak, so your voice never teaches it to cancel itself.
+3. **Calibrated residual suppression.** What a linear filter cannot model (speaker distortion, the far
+   reverb tail) is suppressed by exactly the amount measured to be left over, so the voice keeps its body.
+
+Long sessions run in 5-minute chunks (about 3.5 GB of RAM, roughly 8 minutes of processing per hour of
+recording on a desktop CPU). On a simulated session (`tests/test_aec.py`: game 3 dB under the voice
+through 250 ms of room reverb, 23.4 ms late, 40 ppm drift) the delay and drift come out exact to
+0.01 ms / 0.01 ppm, game-only stretches go from -26 dBFS to -62 dBFS after polishing, and the
+voice-to-everything-else ratio goes from 3 dB to 28 dB.
+
+Limits: an equaliser on the speakers is fine (the room filter learns it), but processing that changes
+over time *after* the point the recorder captures (loudness equalisation, virtual surround, a
+compressor on the output) or speakers turned up until they distort leave more behind. With headphones
+there is nothing to remove. The report's `peak_sharpness` shows how well the two tracks match; below 8
+it warns.
+
 ## Requirements
 
 | Component | Needed for | Notes |
@@ -82,6 +149,7 @@ Denoising (stages 2 and 3) is chosen automatically:
 | ALSA utilities | `setup-mic.sh` | `amixer` and `arecord` |
 | [uv](https://docs.astral.sh/uv/) | `--ai` mode | Creates the Python 3.12 environment |
 | GPU (optional) | `--ai` mode | Intel Arc or NVIDIA; the CPU works but is much slower |
+| The Python environment | `session.sh` | `./setup.sh` (NumPy, PyTorch, Silero VAD) |
 
 On Arch Linux:
 
@@ -235,6 +303,16 @@ mic-polish/
 ├── record.sh         Records the microphone to a 48 kHz float WAV
 ├── enhance.sh        The processing chain
 ├── polish.sh         Alias for enhance.sh
+├── session.sh        A whole gameplay session (engine/session.py)
+├── engine/
+│   ├── session.py    Read, remove the game, detect speech, polish, duck, mark
+│   ├── aec.py        Game removal (delay/drift, least-squares room filter, residual suppression)
+│   ├── vad.py        Speech segments (Silero VAD) and the room-noise clip
+│   ├── duck.py       Ducking keyframes, markers (CSV, FilmCraft)
+│   └── audio.py      Audio in and out through FFmpeg
+├── tests/
+│   ├── test_aec.py   Game removal on a simulated session (delay, drift, how much is removed)
+│   └── make_session.py  Builds a fake two-track MKV for an end-to-end run
 ├── ai_enhance.py     Resemble Enhance wrapper (denoise / enhance)
 ├── requirements.txt  Python dependencies for ai_enhance.py
 └── models/
@@ -259,6 +337,7 @@ It builds on these projects, each under its own license:
   `models/sh.rnnn` is the "somnolent-hogwash" model (speech recorded with noise).
 - [FFmpeg](https://ffmpeg.org/): audio processing.
 - [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) (optional).
+- [Silero VAD](https://github.com/snakers4/silero-vad) (MIT): speech detection.
 - [Rubber Band](https://breakfastquay.com/rubberband/): pitch shifting with formant preservation.
 
 This project is not affiliated with any of the above.

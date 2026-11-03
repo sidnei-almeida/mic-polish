@@ -1,4 +1,4 @@
-# Runtime dependencies for ai_enhance.py (Resemble Enhance).
+# Runtime dependencies for ai_enhance.py (Resemble Enhance) and the session engine (engine/).
 # PyTorch is installed separately by setup.sh, from the index that matches your GPU.
 # Versions are the ones the pipeline was tested with.
 numpy==2.5.4
@@ -12,3 +12,4 @@ huggingface_hub==2.3.0
 matplotlib==3.11.2
 pandas==3.1.0
 tabulate==0.10.0
+silero-vad==6.2.3
